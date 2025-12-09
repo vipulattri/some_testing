@@ -1,0 +1,164 @@
+//----------------------------------------------------
+// CLEANED: find assets with PUT-TO-USE <= depreciation month
+// and create cm_depreciation record if not present
+//----------------------------------------------------
+
+// Inputs
+entityID = cm_dep_run_rate.get("module_record_id");
+orgID = organization.get("organization_id");
+
+// Fetch depreciation month & year
+rec = zoho.books.getRecordsByID("cm_dep_run_rate", orgID, entityID, "books_far");
+hash = rec.get("module_record_hash");
+depMonth = hash.get("cf_dep_for_month");
+depYear  = hash.get("cf_dep_for_year");
+
+// Month map (day-month) — keep values consistent, we'll add year later
+monthMap = {"Jan":"31-01", "Feb":"28-02", "Mar":"31-03", "Apr":"30-04", "May":"31-05", "Jun":"30-06", "Jul":"31-07", "Aug":"31-08", "Sep":"30-09", "Oct":"31-10", "Nov":"30-11", "Dec":"31-12"};
+
+// Build lastDate string (dd-MM-yyyy), fix Feb for leap years
+lastDateStr = monthMap.get(depMonth) + "-" + depYear;
+if(depMonth == "Feb")
+{
+    y = depYear.toNumber();
+    if((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0))
+    {
+        lastDateStr = "29-02-" + depYear;
+    }
+}
+
+// Convert to date objects
+// Note: use explicit format where possible
+endDate = lastDateStr.toDate("dd-MM-yyyy");
+startDateStr = endDate.toString("yyyy-MM-") + "01";
+startDate = startDateStr.toDate("yyyy-MM-dd");
+
+// Prepare output list
+assetCodes = List();
+
+// Pagination (increase pages if you have >2000 assets)
+pages = {1,2,3,4,5,6,7,8,9,10};
+
+for each p in pages
+{
+    params = Map();
+    params.put("cf_asset_status_formatted","Active");
+    params.put("page", p);
+    params.put("per_page", "200");
+
+    data = zoho.books.getRecords("cm_asset_register", orgID, params, "books_far");
+
+    if(data != null && data.containsKey("module_records"))
+    {
+        recs = data.get("module_records");
+
+        if(recs != null && recs.size() > 0)
+        {
+            for each item in recs
+            {
+                // parse put-to-use date from asset record (handle common formats)
+                raw = item.get("cf_asset_date_of_put_to_use");
+                putDate = null;
+
+                if(raw != null)
+                {
+                    ds = raw.toString().trim();
+
+                    try
+                    {
+                        // dd/MM/yyyy
+                        if(ds.contains("/") && ds.length() >= 8)
+                        {
+                            // take first 10 chars if present
+                            if(ds.length() >= 10)
+                            {
+                                dsSub = ds.subString(0,10);
+                                putDate = dsSub.toDate("dd/MM/yyyy");
+                            }
+                            else
+                            {
+                                putDate = ds.toDate("dd/MM/yyyy");
+                            }
+                        }
+                        // yyyy-MM-dd or yyyy-MM
+                        else if(ds.contains("-"))
+                        {
+                            // full date like yyyy-MM-dd
+                            if(ds.length() >= 10 && ds.subString(4,5) == "-")
+                            {
+                                putDate = ds.subString(0,10).toDate("yyyy-MM-dd");
+                            }
+                            // year-month only like yyyy-MM
+                            else if(ds.length() == 7 && ds.subString(4,5) == "-")
+                            {
+                                putDate = (ds + "-01").toDate("yyyy-MM-dd");
+                            }
+                            else
+                            {
+                                putDate = ds.toDate();
+                            }
+                        }
+                        else
+                        {
+                            // fallback - try generic parse
+                            putDate = ds.toDate();
+                        }
+                    }
+                    catch(e)
+                    {
+                        // failed parsing — skip this asset
+                        putDate = null;
+                    }
+                }
+
+                // RULE: skip assets whose put-to-use is after depreciation month
+                if(putDate == null || putDate > endDate)
+                {
+                    continue;
+                }
+
+                // Check if cm_depreciation record already exists for this asset & run month
+                checkMap = Map();
+                checkMap.put("cf_asset_id", item.get("module_record_id"));
+                checkMap.put("cf_depreciation_rundate_month_", lastDateStr);
+
+                existing = zoho.books.getRecords("cm_depreciation", orgID, checkMap, "books_far");
+
+                if(existing.get("module_records").isEmpty())
+                {
+                    // create new cm_depreciation minimal record (you can add more fields if needed)
+                    newRec = Map();
+                    newRec.put("cf_asset_id", item.get("module_record_id"));
+                    newRec.put("cf_asset_code", item.get("cf_asset_code"));
+                    newRec.put("cf_asset_name", item.get("cf_asset_name"));
+                    newRec.put("cf_date_of_put_to_use", raw);
+                    newRec.put("cf_depreciation_rundate_month_", lastDateStr);
+
+                    // create record
+                    try
+                    {
+                        zoho.books.createRecord("cm_depreciation", orgID, newRec, "books_far");
+                        info "CREATED depreciation for asset: " + item.get("cf_asset_code");
+                    }
+                    catch(e)
+                    {
+                        info "CREATE_ERROR for asset " + item.get("cf_asset_code") + " : " + e;
+                    }
+                }
+                else
+                {
+                    info "ALREADY EXISTS: " + item.get("cf_asset_code");
+                }
+
+                // add to output list
+                assetCodes.add(item.get("cf_asset_code"));
+            }
+        }
+    }
+}
+
+// FINAL OUTPUT
+result = Map();
+result.put("count", assetCodes.size());
+result.put("asset_codes", assetCodes);
+return result;
