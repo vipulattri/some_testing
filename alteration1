@@ -1,0 +1,313 @@
+//----------------------------------------------------
+// FULL FIXED CODE (variable name typo corrected)
+//----------------------------------------------------
+recordName = cm_dep_run_rate.get("record_name");
+resultMap = Map();
+resultMap.put("message","Record Name - " + recordName);
+resultMap.put("code",0);
+organizationID = organization.get("organization_id");
+
+// diagnostics holder
+badRecords = List(); // will hold maps {assetId, field, rawValue, error}
+
+//----------------------------------------------------
+// GET SELECTED MONTH/YEAR FROM DEPRECIATION RUN FORM
+//----------------------------------------------------
+entityID = cm_dep_run_rate.get("module_record_id");
+recdetail = zoho.books.getRecordsByID("cm_dep_run_rate",organizationID,entityID,"books_far"); // <-- corrected variable name
+module_hash = recdetail.get("module_record_hash");
+depMonth = module_hash.get("cf_dep_for_month");
+depYear = module_hash.get("cf_dep_for_year");
+
+//----------------------------------------------------
+// LAST DATE OF SELECTED MONTH
+//----------------------------------------------------
+monthMap = {"Jan":"31-01-","Feb":"28-02-","Mar":"31-03-","Apr":"30-04-","May":"31-05-","Jun":"30-06-","Jul":"31-07-","Aug":"31-08-","Sep":"30-09-","Oct":"31-10-","Nov":"30-11-","Dec":"31-12-"};
+lastDateOfMonth = monthMap.get(depMonth) + depYear;
+
+// leap year correction
+if(depMonth == "Feb")
+{
+	yr = depYear.toNumber();
+	if(yr % 4 == 0 && yr % 100 != 0 || yr % 400 == 0)
+	{
+		lastDateOfMonth = "29-02-" + depYear;
+	}
+}
+lastDateOfMonth_date = lastDateOfMonth.toDate();
+
+//----------------------------------------------------
+// CHECK IF DEPRECIATION ALREADY EXISTS
+//----------------------------------------------------
+checkParam = Map();
+checkParam.put("cf_depreciation_rundate_month_",lastDateOfMonth);
+existingDep = zoho.books.getRecords("cm_depreciation",organizationID,checkParam,"books_far");
+if(!existingDep.get("module_records").isEmpty())
+{
+	resultMap.put("code",1);
+	resultMap.put("message","Depreciation already exists for this month.");
+	return resultMap;
+}
+
+//----------------------------------------------------
+// CHECK IF LOG ALREADY HAS THIS RUN DATE
+//----------------------------------------------------
+logs = zoho.books.getRecords("cm_depreciation_log",organizationID,{},"books_far");
+logsList = logs.get("module_records");
+for each log in logsList
+{
+	if(log.get("cf_depreciation_run_dates") == lastDateOfMonth)
+	{
+		resultMap.put("code",1);
+		resultMap.put("message","Depreciation already run earlier for this month.");
+		return resultMap;
+	}
+}
+
+//----------------------------------------------------
+// MONTH DAYS (USED ONLY TO CALCULATE AVAILABLE DAYS)
+//----------------------------------------------------
+daysInMonthMap = {"Jan":31,"Feb":28,"Mar":31,"Apr":30,"May":31,"Jun":30,"Jul":31,"Aug":31,"Sep":30,"Oct":31,"Nov":30,"Dec":31};
+noOfDayInMonth = daysInMonthMap.get(depMonth);
+
+// leap year fix
+if(depMonth == "Feb")
+{
+	yr = depYear.toNumber();
+	if(yr % 4 == 0 && yr % 100 != 0 || yr % 400 == 0)
+	{
+		noOfDayInMonth = 29;
+	}
+}
+
+//----------------------------------------------------
+// PAGINATION LIST
+//----------------------------------------------------
+listPage = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30};
+
+// Counters
+totalAssets = 0;
+createdCount = 0;
+skippedCount = 0;
+
+//----------------------------------------------------
+// PROCESS EACH PAGE
+//----------------------------------------------------
+for each pageNo in listPage
+{
+	searchParam = Map();
+	searchParam.put("cf_asset_status_formatted","Active");
+	searchParam.put("page",pageNo);
+	searchParam.put("per_page","200");
+
+	data = zoho.books.getRecords("cm_asset_register",organizationID,searchParam,"books_far");
+	moduleRecords = data.get("module_records");
+
+	if(moduleRecords.isEmpty())
+	{
+		continue;
+	}
+
+	//----------------------------------------------------
+	// PROCESS EACH ASSET
+	//----------------------------------------------------
+	for each rec in moduleRecords
+	{
+		totalAssets = totalAssets + 1;
+
+		// skip categories/status as before
+		if(rec.get("cf_asset_category_formatted") == "Goodwill")
+		{
+			skippedCount = skippedCount + 1;
+			continue;
+		}
+
+		if(rec.get("cf_asset_status_formatted") == "Sold")
+		{
+			skippedCount = skippedCount + 1;
+			continue;
+		}
+
+		assetId = rec.get("module_record_id");
+
+		//--------------------------------------------
+		// SAFE PARSE: PURCHASE AMOUNT
+		//--------------------------------------------
+		PurchaseAmt = 0.0;
+		try
+		{
+			pRaw = ifnull(rec.get("cf_purchase_amount"),0);
+			pStr = pRaw.toString().trim();
+			pStr = pStr.replaceAll(",", "");
+			pStr = pStr.replaceAll("%", "");
+			if(pStr != "")
+			{
+				PurchaseAmt = pStr.toDecimal();
+			}
+		}
+		catch(e)
+		{
+			diag = Map();
+			diag.put("assetId", assetId);
+			diag.put("field", "cf_purchase_amount");
+			diag.put("rawValue", ifnull(rec.get("cf_purchase_amount"), "null"));
+			diag.put("error", e.toString());
+			badRecords.add(diag);
+			info "PARSE_WARN: asset=" + assetId + " field=cf_purchase_amount raw=" + ifnull(rec.get("cf_purchase_amount"), "null") + " err=" + e;
+			PurchaseAmt = 0.0;
+		}
+
+		//--------------------------------------------
+		// SAFE PARSE: OPENING BALANCE
+		//--------------------------------------------
+		OpeningBalance = 0.0;
+		try
+		{
+			oRaw = ifnull(rec.get("cf_opening_accumulated_balance"),0);
+			oStr = oRaw.toString().trim();
+			oStr = oStr.replaceAll(",", "");
+			oStr = oStr.replaceAll("%", "");
+			if(oStr != "")
+			{
+				OpeningBalance = oStr.toDecimal();
+			}
+		}
+		catch(e)
+		{
+			diag = Map();
+			diag.put("assetId", assetId);
+			diag.put("field", "cf_opening_accumulated_balance");
+			diag.put("rawValue", ifnull(rec.get("cf_opening_accumulated_balance"), "null"));
+			diag.put("error", e.toString());
+			badRecords.add(diag);
+			info "PARSE_WARN: asset=" + assetId + " field=cf_opening_accumulated_balance raw=" + ifnull(rec.get("cf_opening_accumulated_balance"), "null") + " err=" + e;
+			OpeningBalance = 0.0;
+		}
+
+		//--------------------------------------------
+		// SAFE PARSE: NBV
+		//--------------------------------------------
+		NBV = 0.0;
+		try
+		{
+			nRaw = ifnull(rec.get("cf_net_book_value"),0);
+			nStr = nRaw.toString().trim();
+			nStr = nStr.replaceAll(",", "");
+			nStr = nStr.replaceAll("%", "");
+			if(nStr != "")
+			{
+				NBV = nStr.toDecimal();
+			}
+		}
+		catch(e)
+		{
+			diag = Map();
+			diag.put("assetId", assetId);
+			diag.put("field", "cf_net_book_value");
+			diag.put("rawValue", ifnull(rec.get("cf_net_book_value"), "null"));
+			diag.put("error", e.toString());
+			badRecords.add(diag);
+			info "PARSE_WARN: asset=" + assetId + " field=cf_net_book_value raw=" + ifnull(rec.get("cf_net_book_value"), "null") + " err=" + e;
+			NBV = 0.0;
+		}
+
+		//--------------------------------------------
+		// SAFE PARSE: DEPRECIATION RATE
+		//--------------------------------------------
+		DepRate = 0.0;
+		try
+		{
+			rRaw = rec.get("cf_dep_rate");
+			// handle null gracefully
+			if(rRaw != null)
+			{
+				rStr = rRaw.toString().trim();
+				rStr = rStr.replaceAll(",", "");
+				rStr = rStr.replaceAll("%", "");
+				if(rStr != "")
+				{
+					DepRate = rStr.toDecimal();
+				}
+			}
+		}
+		catch(e)
+		{
+			diag = Map();
+			diag.put("assetId", assetId);
+			diag.put("field", "cf_dep_rate");
+			diag.put("rawValue", ifnull(rec.get("cf_dep_rate"), "null"));
+			diag.put("error", e.toString());
+			badRecords.add(diag);
+			info "PARSE_WARN: asset=" + assetId + " field=cf_dep_rate raw=" + ifnull(rec.get("cf_dep_rate"), "null") + " err=" + e;
+			DepRate = 0.0;
+		}
+
+		//--------------------------------------------
+		// WDV CALCULATION (company method)
+		//--------------------------------------------
+		rateDec = DepRate / 100;
+		monthly_WDV = (NBV * rateDec) / 12;
+		monthly_WDV = monthly_WDV.round(2);
+
+		//--------------------------------------------
+		// ACCUMULATED DEPRECIATION
+		//--------------------------------------------
+		accumulated_depreciation = (OpeningBalance + monthly_WDV).round(2);
+
+		//--------------------------------------------
+		// CREATE DEPRECIATION RECORD
+		//--------------------------------------------
+		new_rec = Map();
+		new_rec.put("cf_bill_number",rec.get("cf_bill_no_formatted"));
+		new_rec.put("cf_asset_id",assetId);
+		new_rec.put("cf_asset_code",rec.get("cf_asset_code"));
+		new_rec.put("cf_asset_name",rec.get("cf_asset_name"));
+		new_rec.put("cf_date_of_put_to_use",rec.get("cf_asset_date_of_put_to_use"));
+		new_rec.put("cf_asset_status",rec.get("cf_asset_status"));
+		new_rec.put("cf_annual_dep_rate",DepRate);
+		new_rec.put("cf_purchase_amount",PurchaseAmt);
+		new_rec.put("cf_depreciation_for_current_mo_1",monthly_WDV);
+		new_rec.put("cf_accumulated_depreciation",accumulated_depreciation);
+		new_rec.put("cf_depreciation_rundate_month_",lastDateOfMonth);
+
+		try
+		{
+			zoho.books.createRecord("cm_depreciation",organizationID,new_rec,"books_far");
+			createdCount = createdCount + 1;
+		}
+		catch(e)
+		{
+			diag2 = Map();
+			diag2.put("assetId", assetId);
+			diag2.put("action", "create_record_failed");
+			diag2.put("error", e.toString());
+			badRecords.add(diag2);
+			info "CREATE_FAIL: asset=" + assetId + " err=" + e;
+		}
+	}
+}
+
+//----------------------------------------------------
+// FINAL RETURN + DIAGNOSTICS
+//----------------------------------------------------
+resultMap.put("code",0);
+resultMap.put("message","Depreciation (WDV) calculated. See diagnostics for parse issues.");
+resultMap.put("total_assets_scanned", totalAssets);
+resultMap.put("total_records_created", createdCount);
+resultMap.put("total_assets_skipped", skippedCount);
+resultMap.put("total_parse_issues", badRecords.size());
+
+// return up to first 10 bad records for quick inspection
+firstBad = List();
+countReturn = 0;
+for each br in badRecords
+{
+    if(countReturn < 10)
+    {
+        firstBad.add(br);
+    }
+    countReturn = countReturn + 1;
+}
+resultMap.put("bad_records_sample", firstBad);
+
+return resultMap;
