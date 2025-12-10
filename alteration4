@@ -1,0 +1,266 @@
+//----------------------------------------------------
+// HEADER + BASIC DETAILS
+//----------------------------------------------------
+recordName = cm_dep_run_rate.get("record_name");
+resultMap = Map();
+resultMap.put("message","Record Name - " + recordName);
+resultMap.put("code",0);
+organizationID = organization.get("organization_id");
+
+//----------------------------------------------------
+// GET SELECTED MONTH/YEAR
+//----------------------------------------------------
+entityID = cm_dep_run_rate.get("module_record_id");
+recdetail = zoho.books.getRecordsByID("cm_dep_run_rate", organizationID, entityID, "books_far");
+info recdetail;
+
+recHash = recdetail.get("module_record_hash");
+
+if(recHash == null)
+{
+    resultMap.put("code",1);
+    resultMap.put("message","Record hash missing.");
+    return resultMap;
+}
+
+depMonth = recHash.get("cf_dep_for_month");
+depYear = recHash.get("cf_dep_for_year");
+
+if(depMonth == null || depYear == null)
+{
+    resultMap.put("code",1);
+    resultMap.put("message","Depreciation Month or Year missing.");
+    return resultMap;
+}
+
+//----------------------------------------------------
+// MONTH MAP (DELUGE SAFE)
+//----------------------------------------------------
+monthMap = Map();
+monthMap.put("Jan","31-01-");
+monthMap.put("Feb","28-02-");
+monthMap.put("Mar","31-03-");
+monthMap.put("Apr","30-04-");
+monthMap.put("May","31-05-");
+monthMap.put("Jun","30-06-");
+monthMap.put("Jul","31-07-");
+monthMap.put("Aug","31-08-");
+monthMap.put("Sep","30-09-");
+monthMap.put("Oct","31-10-");
+monthMap.put("Nov","30-11-");
+monthMap.put("Dec","31-12-");
+
+lastDateOfMonth = monthMap.get(depMonth) + depYear;
+
+// Leap year correction
+if(depMonth == "Feb")
+{
+    y = depYear.toLong();
+    if( ((y % 4) == 0 && (y % 100) != 0) || (y % 400 == 0) )
+    {
+        lastDateOfMonth = "29-02-" + depYear;
+    }
+}
+
+runDate = lastDateOfMonth.toDate("dd-MM-yyyy");
+
+//----------------------------------------------------
+// CHECK EXISTING DEPRECIATION
+//----------------------------------------------------
+checkParam = Map();
+checkParam.put("cf_depreciation_rundate_month_", lastDateOfMonth);
+
+existingDep = zoho.books.getRecords("cm_depreciation", organizationID, checkParam, "books_far");
+existingList = ifnull(existingDep.get("module_records"), List());
+
+isFullRun = existingList.isEmpty();
+existingAssetIDs = List();
+
+for each recEx in existingList
+{
+    existingAssetIDs.add(recEx.get("cf_asset_id"));
+}
+
+//----------------------------------------------------
+// PAGINATION WITHOUT 'while' OR '1..50' (BOOKS SAFE)
+//----------------------------------------------------
+pageList = {1};
+
+for each pageNo in pageList
+{
+    searchParam = Map();
+    searchParam.put("page", pageNo);
+    searchParam.put("per_page", "5");
+
+    data = zoho.books.getRecords("cm_asset_register", organizationID, searchParam, "books_far");
+    assetList = ifnull(data.get("module_records"), List());
+
+    if(assetList.isEmpty())
+    {
+        break;
+    }
+
+    //----------------------------------------------------
+    // PROCESS EACH ASSET
+    //----------------------------------------------------
+    for each rec in assetList
+    {
+        // Skip Goodwill
+        if(rec.get("cf_asset_category_formatted") == "Goodwill")
+        {
+            continue;
+        }
+
+        // Skip Sold assets
+        if(rec.get("cf_asset_status_formatted") == "Sold")
+        {
+            continue;
+        }
+
+        // Put-to-use date
+        putRaw = rec.get("cf_asset_date_of_put_to_use");
+        if(putRaw == null)
+        {
+            continue;
+        }
+
+        putDate = null;
+        try
+        {
+            putDate = putRaw.toString().toDate();
+        }
+        catch(e)
+        {
+            continue;
+        }
+
+        // Skip assets activated after run month
+        if(putDate > runDate)
+        {
+            continue;
+        }
+
+        // PARTIAL RUN: Only new assets of same month
+        if(!isFullRun)
+        {
+            assetId = rec.get("module_record_id");
+
+            if(existingAssetIDs.contains(assetId))
+            {
+                continue;
+            }
+
+            if(putDate.getMonth() != runDate.getMonth() || putDate.getYear() != runDate.getYear())
+            {
+                continue;
+            }
+        }
+
+        //----------------------------------------------------
+        // WDV CALCULATION - SAFE NUMERIC PARSING
+        //----------------------------------------------------
+        // Purchase Amount
+        PurchaseAmt = 0.0;
+        PurchaseAmtRaw = ifnull(rec.get("cf_purchase_amount"), "0").toString();
+        PurchaseAmtClean = PurchaseAmtRaw.replaceAll(",","");
+        // Remove any non-numeric except dot and minus (defensive)
+        PurchaseAmtClean = PurchaseAmtClean.replaceAll("[^0-9.\\-]","");
+        try
+        {
+            PurchaseAmt = PurchaseAmtClean.toDecimal();
+        }
+        catch(e)
+        {
+            PurchaseAmt = 0.0;
+        }
+
+        // Opening Accumulated Balance
+        OpeningBal = 0.0;
+        OpeningBalRaw = ifnull(rec.get("cf_opening_accumulated_balance"), "0").toString();
+        OpeningBalClean = OpeningBalRaw.replaceAll(",","");
+        OpeningBalClean = OpeningBalClean.replaceAll("[^0-9.\\-]","");
+        try
+        {
+            OpeningBal = OpeningBalClean.toDecimal();
+        }
+        catch(e)
+        {
+            OpeningBal = 0.0;
+        }
+
+        // Net Book Value
+        NBV = 0.0;
+        NBVRaw = ifnull(rec.get("cf_net_book_value"), "0").toString();
+        NBVClean = NBVRaw.replaceAll(",","");
+        NBVClean = NBVClean.replaceAll("[^0-9.\\-]","");
+        try
+        {
+            NBV = NBVClean.toDecimal();
+        }
+        catch(e)
+        {
+            NBV = 0.0;
+        }
+
+        // Depreciation Rate
+        DepRate = 0.0;
+        DepRateRaw = ifnull(rec.get("cf_dep_rate"), "0").toString();
+        DepRateClean = DepRateRaw.replaceAll("%","").trim();
+        DepRateClean = DepRateClean.replaceAll("[^0-9.\\-]","");
+        try
+        {
+            DepRate = DepRateClean.toDecimal();
+        }
+        catch(e)
+        {
+            DepRate = 0.0;
+        }
+
+        // Ensure we won't divide by zero or use NaN
+        // monthlyDep = ((NBV * (DepRate / 100)) / 12).round(2);
+        try
+        {
+            monthlyDepCalc = (NBV * (DepRate / 100)) / 12;
+            monthlyDep = monthlyDepCalc.round(2);
+        }
+        catch(e)
+        {
+            monthlyDep = 0.0;
+        }
+
+        try
+        {
+            accumulated = (OpeningBal + monthlyDep).round(2);
+        }
+        catch(e)
+        {
+            accumulated = monthlyDep.round(2);
+        }
+
+        //----------------------------------------------------
+        // CREATE DEPRECIATION RECORD
+        //----------------------------------------------------
+        newrec = Map();
+        newrec.put("cf_bill_number", rec.get("cf_bill_no_formatted"));
+        newrec.put("cf_asset_id", rec.get("module_record_id"));
+        newrec.put("cf_asset_code", rec.get("cf_asset_code"));
+        newrec.put("cf_asset_name", rec.get("cf_asset_name"));
+        newrec.put("cf_date_of_put_to_use", rec.get("cf_asset_date_of_put_to_use"));
+        newrec.put("cf_asset_status", rec.get("cf_asset_status"));
+        newrec.put("cf_annual_dep_rate", DepRate);
+        newrec.put("cf_purchase_amount", PurchaseAmt);
+        newrec.put("cf_depreciation_for_current_mo_1", monthlyDep);
+        newrec.put("cf_accumulated_depreciation", accumulated);
+        newrec.put("cf_depreciation_rundate_month_", lastDateOfMonth);
+
+        // Create record (you may want to capture the response if needed)
+        zoho.books.createRecord("cm_depreciation", organizationID, newrec, "books_far");
+    }
+}
+
+//----------------------------------------------------
+// FINAL OUTPUT
+//----------------------------------------------------
+resultMap.put("code",0);
+resultMap.put("message","Depreciation processed successfully.");
+return resultMap;
