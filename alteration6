@@ -1,0 +1,293 @@
+
+//----------------------------------------------------
+// HEADER + BASIC DETAILS
+//----------------------------------------------------
+recordName = cm_dep_run_rate.get("record_name");
+resultMap = Map();
+resultMap.put("message","Record Name - " + recordName);
+resultMap.put("code",0);
+organizationID = organization.get("organization_id");
+//----------------------------------------------------
+// GET SELECTED MONTH/YEAR
+//----------------------------------------------------
+entityID = cm_dep_run_rate.get("module_record_id");
+recdetail = zoho.books.getRecordsByID("cm_dep_run_rate",organizationID,entityID,"books_far");
+recHash = recdetail.get("module_record_hash");
+if(recHash == null)
+{
+	resultMap.put("code",1);
+	resultMap.put("message","Record hash missing.");
+	return resultMap;
+}
+depMonth = recHash.get("cf_dep_for_month");
+depYear = recHash.get("cf_dep_for_year");
+if(depMonth == null || depYear == null)
+{
+	resultMap.put("code",1);
+	resultMap.put("message","Depreciation Month or Year missing.");
+	return resultMap;
+}
+//----------------------------------------------------
+// MONTH MAP
+//----------------------------------------------------
+monthMap = Map();
+monthMap.put("Jan","31-01-");
+monthMap.put("Feb","28-02-");
+monthMap.put("Mar","31-03-");
+monthMap.put("Apr","30-04-");
+monthMap.put("May","31-05-");
+monthMap.put("Jun","30-06-");
+monthMap.put("Jul","31-07-");
+monthMap.put("Aug","31-08-");
+monthMap.put("Sep","30-09-");
+monthMap.put("Oct","31-10-");
+monthMap.put("Nov","30-11-");
+monthMap.put("Dec","31-12-");
+lastDateOfMonth = monthMap.get(depMonth) + depYear;
+// LEAP YEAR FIX
+if(depMonth == "Feb")
+{
+	y = depYear.toLong();
+	if(y % 4 == 0 && y % 100 != 0 || y % 400 == 0)
+	{
+		lastDateOfMonth = "29-02-" + depYear;
+	}
+}
+runDate = lastDateOfMonth.toDate("dd-MM-yyyy");
+//----------------------------------------------------
+// GET ALL DEPRECIATION ENTRIES (PAGINATE SAFELY)
+//----------------------------------------------------
+existingAssetCodes = List();
+// We'll fetch up to 20 pages (adjust if you expect more)
+pageList = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25};
+for each  pageNo in pageList
+{
+	dpParam = Map();
+	dpParam.put("page",pageNo);
+	dpParam.put("per_page","200");
+	dpList = zoho.books.getRecords("cm_depreciation",organizationID,dpParam,"books_far");
+	recList = ifnull(dpList.get("module_records"),List());
+	if(recList.isEmpty())
+	{
+		break;
+	}
+	else
+	{
+		for each  d in recList
+		{
+			// Normalize asset code to string before adding
+			try 
+			{
+				codeVal = ifnull(d.get("cf_asset_code"),"").toString();
+				if(codeVal != "")
+				{
+					existingAssetCodes.add(codeVal);
+				}
+			}
+			catch (e)
+			{
+				// ignore single bad record and continue
+			}
+		}
+	}
+}
+//----------------------------------------------------
+// GET ASSET REGISTER PAGES (PAGINATE SAFELY)
+//----------------------------------------------------
+assetListAll = List();
+// We'll fetch up to 20 pages for assets as well
+for each  aPage in pageList
+{
+	assetParam = Map();
+	assetParam.put("page",aPage);
+	assetParam.put("per_page","200");
+	assetData = zoho.books.getRecords("cm_asset_register",organizationID,assetParam,"books_far");
+	aRecList = ifnull(assetData.get("module_records"),List());
+	if(aRecList.isEmpty())
+	{
+		break;
+	}
+	else
+	{
+		for each  ar in aRecList
+		{
+			assetListAll.add(ar);
+		}
+	}
+}
+//----------------------------------------------------
+// PROCESS EACH ASSET
+//----------------------------------------------------
+for each  rec in assetListAll
+{
+	valid = true;
+	// get asset code as string
+	try 
+	{
+		assetCode = ifnull(rec.get("cf_asset_code"),"").toString();
+	}
+	catch (e)
+	{
+		assetCode = "";
+	}
+	// If asset code already exists in depreciation -> skip
+	if(assetCode != "" && existingAssetCodes.contains(assetCode))
+	{
+		valid = false;
+	}
+	// Skip Goodwill
+	if(valid && rec.get("cf_asset_category_formatted") == "Goodwill")
+	{
+		valid = false;
+	}
+	// Skip Sold Assets
+	if(valid && rec.get("cf_asset_status_formatted") == "Sold")
+	{
+		valid = false;
+	}
+	// Validate Put-to-Use date
+	putRaw = rec.get("cf_asset_date_of_put_to_use");
+	putDate = null;
+	if(valid)
+	{
+		if(putRaw == null)
+		{
+			valid = false;
+		}
+		else
+		{
+			// Try several common formats
+			try 
+			{
+				putDate = putRaw.toString().toDate("yyyy-MM-dd");
+			}
+			catch (e1)
+			{
+				try 
+				{
+					putDate = putRaw.toString().toDate("dd-MM-yyyy");
+				}
+				catch (e2)
+				{
+					try 
+					{
+						putDate = putRaw.toString().toDate();
+					}
+					catch (e3)
+					{
+						putDate = null;
+					}
+				}
+			}
+			if(putDate == null)
+			{
+				valid = false;
+			}
+		}
+	}
+	// Skip if putDate > run month
+	if(valid && putDate != null && putDate > runDate)
+	{
+		valid = false;
+	}
+	if(valid)
+	{
+		PurchaseAmt = 0.0;
+		PurchaseAmtRaw = ifnull(rec.get("cf_purchase_amount"),"0").toString();
+		PurchaseAmtClean = PurchaseAmtRaw.replaceAll(",","");
+		// Remove any non-numeric except dot and minus (defensive)
+		PurchaseAmtClean = PurchaseAmtClean.replaceAll("[^0-9.\\-]","");
+		try 
+		{
+			PurchaseAmt = PurchaseAmtClean.toDecimal();
+		}
+		catch (e)
+		{
+			PurchaseAmt = 0.0;
+		}
+		// Opening Accumulated Balance
+		OpeningBal = 0.0;
+		OpeningBalRaw = ifnull(rec.get("cf_opening_accumulated_balance"),"0").toString();
+		OpeningBalClean = OpeningBalRaw.replaceAll(",","");
+		OpeningBalClean = OpeningBalClean.replaceAll("[^0-9.\\-]","");
+		try 
+		{
+			OpeningBal = OpeningBalClean.toDecimal();
+		}
+		catch (e)
+		{
+			OpeningBal = 0.0;
+		}
+		// Net Book Value
+		NBV = 0.0;
+		NBVRaw = ifnull(rec.get("cf_net_book_value"),"0").toString();
+		NBVClean = NBVRaw.replaceAll(",","");
+		NBVClean = NBVClean.replaceAll("[^0-9.\\-]","");
+		try 
+		{
+			NBV = NBVClean.toDecimal();
+		}
+		catch (e)
+		{
+			NBV = 0.0;
+		}
+		// Depreciation Rate
+		DepRate = 0.0;
+		DepRateRaw = ifnull(rec.get("cf_dep_rate"),"0").toString();
+		DepRateClean = DepRateRaw.replaceAll("%","").trim();
+		DepRateClean = DepRateClean.replaceAll("[^0-9.\\-]","");
+		try 
+		{
+			DepRate = DepRateClean.toDecimal();
+		}
+		catch (e)
+		{
+			DepRate = 0.0;
+		}
+		// Ensure we won't divide by zero or use NaN
+		// monthlyDep = ((NBV * (DepRate / 100)) / 12).round(2);
+		try 
+		{
+			monthlyDepCalc = (NBV * DepRate / 100) / 12;
+			monthlyDep = monthlyDepCalc.round(2);
+		}
+		catch (e)
+		{
+			monthlyDep = 0.0;
+		}
+		try 
+		{
+			accumulated = (OpeningBal + monthlyDep).round(2);
+		}
+		catch (e)
+		{
+			accumulated = monthlyDep.round(2);
+		}
+		//----------------------------------------------------
+		// CREATE DEPRECIATION RECORD
+		newrec = Map();
+		newrec.put("cf_bill_number",rec.get("cf_bill_no_formatted"));
+		newrec.put("cf_asset_id",rec.get("module_record_id"));
+		newrec.put("cf_asset_code",assetCode);
+		newrec.put("cf_asset_name",rec.get("cf_asset_name"));
+		newrec.put("cf_date_of_put_to_use",rec.get("cf_asset_date_of_put_to_use"));
+		newrec.put("cf_asset_status",rec.get("cf_asset_status"));
+		newrec.put("cf_annual_dep_rate",DepRate);
+		newrec.put("cf_purchase_amount",PurchaseAmt);
+		newrec.put("cf_depreciation_for_current_mo_1",monthlyDep);
+		newrec.put("cf_accumulated_depreciation",accumulated);
+		newrec.put("cf_depreciation_rundate_month_",lastDateOfMonth);
+		zoho.books.createRecord("cm_depreciation",organizationID,newrec,"books_far");
+		// Optionally add this code to existingAssetCodes to avoid duplicates within same run
+		existingAssetCodes.add(assetCode);
+	}
+	// end if(valid)
+	// else -> skipped
+}
+// end for each rec
+//----------------------------------------------------
+// FINAL OUTPUT
+//----------------------------------------------------
+resultMap.put("code",0);
+resultMap.put("message","New depreciation records created successfully.");
+return resultMap;
